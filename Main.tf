@@ -1,9 +1,22 @@
+
+# Create environment variables for accessing AWS account. Mark them sensitive so they dont get stored in TF state
+variable "access_key" {
+  description = "The access key for the AWS account"
+  type        = string
+  sensitive = true 
+}
+variable "secret_key" {
+  description = "The secret key for the AWS account"
+  type        = string
+  sensitive = true
+}
+
+
+# Configure the AWS Provider
 provider "aws" {
   region = "eu-west-2"
-
-# Dont store your access keys in the code ! 
-  access_key = ""
-  secret_key = ""
+  access_key = var.access_key
+  secret_key = var.secret_key
 }
 
 # Create a VPC 
