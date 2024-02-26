@@ -1,0 +1,83 @@
+Resources:
+  RdsInstancePublicAccessCheck:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: rds-instance-public-access-check
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::RDS::DBInstance"
+      Source:
+        Owner: AWS
+        SourceIdentifier: RDS_INSTANCE_PUBLIC_ACCESS_CHECK
+
+  RdsSnapShotPublicAccessCheck:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: rds-snapshots-public-prohibited
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::RDS::DBSnapshot"
+          - "AWS::RDS::DBClusterSnapshot"
+      Source:
+        Owner: AWS
+        SourceIdentifier: RDS_SNAPSHOTS_PUBLIC_PROHIBITED
+
+  RemediationConfigurationForRdsInstance:
+    DependsOn: RdsInstancePublicAccessCheck
+    Type: 'AWS::Config::RemediationConfiguration'
+    Properties:
+      ConfigRuleName: rds-instance-public-access-check # Ensure this matches the ConfigRuleName exactly
+      TargetId: "AWSConfigRemediation-DisablePublicAccessToRDSInstance"
+      TargetType: "SSM_DOCUMENT"
+      TargetVersion: "1"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - arn:aws:iam::---:role/RDSRemediation  # Create Role for SSM playbook to auto-remediate 
+        DbiResourceId:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 10
+          ErrorPercentage: 10
+      Automatic: True
+      MaximumAutomaticAttempts: 10
+      RetryAttemptSeconds: 600
+
+  RemediationConfigurationForRdsSnapshot:
+    DependsOn: RdsSnapShotPublicAccessCheck
+    Type: 'AWS::Config::RemediationConfiguration'
+    Properties:
+      ConfigRuleName: rds-snapshots-public-prohibited # Ensure this matches the ConfigRuleName exactly
+      TargetId: "AWSSupport-ModifyRDSSnapshotPermission"
+      TargetType: "SSM_DOCUMENT"
+      TargetVersion: "3"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - arn:aws:iam::--:role/RDSRemediation    # Create Role for SSM playbook to auto-remediate 
+        SnapshotIdentifiers:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+        Private:
+          StaticValue:
+            Values:
+              - "Yes"
+        AccountIds:
+          StaticValue:
+            Values:
+              - "None"
+        AccountPermissionOperation:
+          StaticValue:
+            Values:
+              - "None"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 10
+          ErrorPercentage: 10
+      Automatic: True
+      MaximumAutomaticAttempts: 10
+      RetryAttemptSeconds: 600
