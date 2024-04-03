@@ -1,0 +1,36 @@
+Resources:
+  RedShiftInstancePublicAccessCheck:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: redshift-cluster-public-access-check
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::Redshift::Cluster"
+      Source:
+        Owner: AWS
+        SourceIdentifier: REDSHIFT_CLUSTER_PUBLIC_ACCESS_CHECK
+
+
+  RemediationConfigurationForRedShift:
+    DependsOn: RedShiftInstancePublicAccessCheck
+    Type: 'AWS::Config::RemediationConfiguration'
+    Properties:
+      ConfigRuleName: redshift-cluster-public-access-check # Ensure this matches the ConfigRuleName exactly
+      TargetId: "AWSConfigRemediation-DisablePublicAccessToRedshiftCluster"
+      TargetType: "SSM_DOCUMENT"
+      TargetVersion: "3"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - arn:aws:iam::--:role/RDSRemediation  # Create Role for SSM playbook to auto-remediate 
+        ClusterIdentifier:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 10
+          ErrorPercentage: 10
+      Automatic: True
+      MaximumAutomaticAttempts: 10
+      RetryAttemptSeconds: 600
