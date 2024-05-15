@@ -1,0 +1,70 @@
+Resources:
+  EKSPublicAccessCheck:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: eks-endpoint-no-public-access
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::EKS::Cluster"
+      Source:
+        Owner: AWS
+        SourceIdentifier: EKS_ENDPOINT_NO_PUBLIC_ACCESS
+
+  EKSSecretCheck:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: eks-secrets-encrypted
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::EKS::Cluster"
+      Source:
+        Owner: AWS
+        SourceIdentifier: EKS_SECRETS_ENCRYPTED
+
+  RemediationConfigurationForPublicEKS:
+    DependsOn: EKSPublicAccessCheck
+    Type: 'AWS::Config::RemediationConfiguration'
+    Properties:
+      ConfigRuleName: eks-endpoint-no-public-access # Ensure this matches the ConfigRuleName exactly
+      TargetId: "AWS-DeleteEKSCluster"
+      TargetType: "SSM_DOCUMENT"
+      TargetVersion: "1"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - arn:aws:iam::-:role/AutoAssumeRole  # Create Role for SSM playbook to auto-remediate
+        EKSClusterName:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 10
+          ErrorPercentage: 10
+      Automatic: True
+      MaximumAutomaticAttempts: 10
+      RetryAttemptSeconds: 600
+
+  RemediationConfigurationForSecretEKS:
+    DependsOn: EKSSecretCheck
+    Type: 'AWS::Config::RemediationConfiguration'
+    Properties:
+      ConfigRuleName: eks-secrets-encrypted # Ensure this matches the ConfigRuleName exactly
+      TargetId: "AWS-DeleteEKSCluster"
+      TargetType: "SSM_DOCUMENT"
+      TargetVersion: "1"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - arn:aws:iam::-:role/AutoAssumeRole  # Create Role for SSM playbook to auto-remediate
+        EKSClusterName:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 10
+          ErrorPercentage: 10
+      Automatic: True
+      MaximumAutomaticAttempts: 10
+      RetryAttemptSeconds: 600
