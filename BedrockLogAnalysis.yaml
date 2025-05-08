@@ -13,6 +13,14 @@ Parameters:
     AllowedPattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
     ConstraintDescription: Must be a valid email address
 
+  BedrockRegion:
+    Type: String
+    Default: us-east-1
+    Description: AWS region to invoke the Bedrock model (must be a supported region)
+    AllowedValues:
+      - us-east-1
+      - us-west-2
+
 Resources:
 
   # S3 bucket to store SSM Session Manager log files
@@ -234,7 +242,10 @@ Resources:
 
           s3_client = boto3.client('s3')
           sns_client = boto3.client('sns')
-          bedrock_client = boto3.client("bedrock-runtime", region_name="us-east-1")
+
+          # Read region from environment variable
+          bedrock_region = os.environ.get("BEDROCK_REGION", "us-east-1")
+          bedrock_client = boto3.client("bedrock-runtime", region_name=bedrock_region)
 
           model_id = "anthropic.claude-3-haiku-20240307-v1:0"
 
@@ -299,6 +310,7 @@ Resources:
       Environment:
         Variables:
           SNS_TOPIC_ARN: !Ref LogNotificationTopic
+          BEDROCK_REGION: !Ref BedrockRegion
 
   # Permission allowing EventBridge to invoke Lambda function
   LambdaPermissionForEventBridge:
