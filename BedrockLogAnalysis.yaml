@@ -1,0 +1,331 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: GenAI Powered Log Analysis with Bedrock
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: EC2 instance type to launch for testing SSM session logging
+
+  EmailAddress:
+    Type: String
+    Description: Email address to receive log analysis results
+    AllowedPattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+    ConstraintDescription: Must be a valid email address
+
+Resources:
+
+  # S3 bucket to store SSM Session Manager log files
+  SessionLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Separate S3 bucket for CloudTrail logs
+  CloudTrailLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Bucket policy to allow SSM to write logs to the session bucket
+  SSMLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SessionLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${SessionLogBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Sub '${AWS::AccountId}'
+
+  # Bucket policy to allow CloudTrail to write logs to the CloudTrail bucket
+  CloudTrailLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub '${CloudTrailLogBucket.Arn}'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Sub '${AWS::AccountId}'
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${CloudTrailLogBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Sub '${AWS::AccountId}'
+                s3:x-amz-acl: bucket-owner-full-control
+
+  # IAM role for EC2 with permission to use SSM and write to the log bucket
+  EC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EC2SSMRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AllowPutObjectToSessionLogBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${SessionLogBucket.Arn}/*'
+        - PolicyName: AllowS3EncryptionCheck
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetEncryptionConfiguration
+                Resource: !Sub arn:aws:s3:::${SessionLogBucket}
+
+  # Instance profile to associate IAM role with EC2
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2SSMRole
+
+  # EC2 instance for testing SSM log generation
+  TestEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: TestSessionManagerInstance
+
+  # CloudTrail trail to capture S3 object-level events (only for session log bucket)
+  S3LoggingTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+      - CloudTrailLogBucketPolicy
+    Properties:
+      TrailName: S3LoggingTrail
+      S3BucketName: !Ref CloudTrailLogBucket
+      IsLogging: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      IsMultiRegionTrail: false
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: false
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub arn:aws:s3:::${SessionLogBucket}/
+
+  # SNS topic to send Bedrock analysis notifications
+  LogNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: SSM-Log-Notifications
+      TopicName: SSMLogNotifications
+
+  # Subscription to send notifications to the email address provided
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref LogNotificationTopic
+      Protocol: email
+      Endpoint: !Ref EmailAddress
+
+  # EventBridge rule to detect PutObject API events in the session log bucket
+  S3EventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - PutObject
+          requestParameters:
+            bucketName:
+              - !Ref SessionLogBucket
+      Targets:
+        - Arn: !GetAtt LogTriggerLambda.Arn
+          Id: LambdaTarget
+
+  # IAM role for the Lambda function to use Bedrock, access S3, and publish to SNS
+  LogTriggerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaS3TriggerRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowSNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref LogNotificationTopic
+        - PolicyName: AllowS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${SessionLogBucket.Arn}/*'
+        - PolicyName: AllowBedrockInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: "*"
+
+  # Lambda function to analyze uploaded log files using Amazon Bedrock
+  LogTriggerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: S3LogEventBridgeHandler
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt LogTriggerLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          s3_client = boto3.client('s3')
+          sns_client = boto3.client('sns')
+          bedrock_client = boto3.client("bedrock-runtime", region_name="us-east-1")
+
+          model_id = "anthropic.claude-3-haiku-20240307-v1:0"
+
+          def lambda_handler(event, context):
+              detail = event['detail']
+              bucket_name = detail['requestParameters']['bucketName']
+              object_key = detail['requestParameters'].get('key', 'Unknown')
+
+              try:
+                  s3_response = s3_client.get_object(Bucket=bucket_name, Key=object_key)
+                  file_content = s3_response['Body'].read().decode('utf-8')
+              except Exception as e:
+                  print(f"Error reading object {object_key} from bucket {bucket_name}. Error: {str(e)}")
+                  file_content = f"Error reading object {object_key} from bucket {bucket_name}. Error: {str(e)}"
+
+              prompt = (
+                  f"As an expert in log file analysis, analyze the following log file. "
+                  f"Summarize what the user did in the session and identify any suspicious activity "
+                  f"that might need to be checked:\n\n{file_content}"
+              )
+
+              native_request = {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 512,
+                  "temperature": 0.5,
+                  "messages": [
+                      {
+                          "role": "user",
+                          "content": [{"type": "text", "text": prompt}],
+                      }
+                  ],
+              }
+
+              request = json.dumps(native_request)
+
+              try:
+                  response = bedrock_client.invoke_model(modelId=model_id, body=request)
+                  model_response = json.loads(response["body"].read())
+                  response_text = model_response["content"][0]["text"]
+              except Exception as e:
+                  print(f"Error invoking Bedrock model. Error: {str(e)}")
+                  response_text = f"Error invoking Bedrock model. Error: {str(e)}"
+
+              message = f"An log file with key '{object_key}' was uploaded to the S3 bucket '{bucket_name}'.\n\n"
+              message += "Bedrock model response:\n"
+              message += response_text
+
+              try:
+                  sns_client.publish(
+                      TopicArn=os.environ['SNS_TOPIC_ARN'],
+                      Message=message,
+                      Subject="Session Manager Log File Analysis by Amazon Bedrock"
+                  )
+                  print("Notification sent successfully!")
+              except Exception as e:
+                  print(f"Error publishing to SNS topic. Error: {str(e)}")
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Function executed successfully!')
+              }
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref LogNotificationTopic
+
+  # Permission allowing EventBridge to invoke Lambda function
+  LambdaPermissionForEventBridge:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LogTriggerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt S3EventBridgeRule.Arn
+
+Outputs:
+  SessionBucketName:
+    Description: Name of the S3 bucket used for session logs
+    Value: !Ref SessionLogBucket
+
+  CloudTrailBucketName:
+    Description: Name of the S3 bucket used for CloudTrail logs
+    Value: !Ref CloudTrailLogBucket
+
+  InstanceId:
+    Description: ID of the EC2 instance
+    Value: !Ref TestEC2Instance
+
+  TrailName:
+    Description: CloudTrail trail capturing S3 events
+    Value: !Ref S3LoggingTrail
+
+  SNSTopicARN:
+    Description: ARN of the SNS topic for log notifications
+    Value: !Ref LogNotificationTopic
